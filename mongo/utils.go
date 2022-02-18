@@ -1,4 +1,4 @@
-package main
+package mongo
 
 import (
 	"encoding/binary"
@@ -11,24 +11,33 @@ import (
 	"github.com/globalsign/mgo/bson"
 )
 
-func MustReadInt32(r io.Reader) (n int32) {
+func IsClosedErr(err error) bool {
+	if e, ok := err.(*net.OpError); ok {
+		if e.Err.Error() == "use of closed network connection" {
+			return true
+		}
+	}
+	return false
+}
+
+func mustReadInt32(r io.Reader) (n int32) {
 	err := binary.Read(r, binary.LittleEndian, &n)
 	if err != nil {
 		panic(err)
 	}
 	return
 }
-func ReadInt32(r io.Reader) (n int32, err error) {
+func readInt32(r io.Reader) (n int32, err error) {
 	err = binary.Read(r, binary.LittleEndian, &n)
 	return
 }
 
-func ReadUint32(r io.Reader) (n uint32, err error) {
+func readUint32(r io.Reader) (n uint32, err error) {
 	err = binary.Read(r, binary.LittleEndian, &n)
 	return
 }
 
-func ReadInt64(r io.Reader) *int64 {
+func readInt64(r io.Reader) *int64 {
 	var n int64
 	err := binary.Read(r, binary.LittleEndian, &n)
 	if err != nil {
@@ -40,7 +49,7 @@ func ReadInt64(r io.Reader) *int64 {
 	return &n
 }
 
-func ReadBytes(r io.Reader, n int) []byte {
+func readBytes(r io.Reader, n int) []byte {
 	b := make([]byte, n)
 	_, err := r.Read(b)
 	if err != nil {
@@ -52,7 +61,7 @@ func ReadBytes(r io.Reader, n int) []byte {
 	return b
 }
 
-func ReadCString(r io.Reader) string {
+func readCString(r io.Reader) string {
 	var b []byte
 	var one = make([]byte, 1)
 	for {
@@ -68,8 +77,8 @@ func ReadCString(r io.Reader) string {
 	return string(b)
 }
 
-func ReadOne(r io.Reader) []byte {
-	docLen, err := ReadInt32(r)
+func readOne(r io.Reader) []byte {
+	docLen, err := readInt32(r)
 	if err != nil {
 		if err == io.EOF {
 			return nil
@@ -84,8 +93,8 @@ func ReadOne(r io.Reader) []byte {
 	return buf
 }
 
-func ReadDocument(r io.Reader) (m bson.M) {
-	if one := ReadOne(r); one != nil {
+func readDocument(r io.Reader) (m bson.M) {
+	if one := readOne(r); one != nil {
 		err := bson.Unmarshal(one, &m)
 		if err != nil {
 			panic(err)
@@ -94,9 +103,9 @@ func ReadDocument(r io.Reader) (m bson.M) {
 	return m
 }
 
-func ReadDocuments(r io.Reader) (ms []bson.M) {
+func readDocuments(r io.Reader) (ms []bson.M) {
 	for {
-		m := ReadDocument(r)
+		m := readDocument(r)
 		if m == nil {
 			break
 		}
@@ -105,21 +114,12 @@ func ReadDocuments(r io.Reader) (ms []bson.M) {
 	return
 }
 
-func ToJson(v interface{}) string {
+func toJson(v interface{}) string {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return fmt.Sprintf("{\"error\":%s}", err.Error())
 	}
 	return string(b)
-}
-
-func isClosedErr(err error) bool {
-	if e, ok := err.(*net.OpError); ok {
-		if e.Err.Error() == "use of closed network connection" {
-			return true
-		}
-	}
-	return false
 }
 
 func currentTime() string {
