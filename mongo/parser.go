@@ -3,8 +3,10 @@ package mongo
 import (
 	"encoding/binary"
 	"fmt"
+	"github.com/mylxsw/asteria/log"
 	"io"
 	"io/ioutil"
+	"runtime/debug"
 )
 
 const (
@@ -35,10 +37,10 @@ type Parser struct {
 	pipeWriter       *io.PipeWriter
 	remoteAddr       string
 	pipeWriterClosed bool
-	recorder         func(message string)
+	recorder         func(opCode int32, message string, data map[string]interface{})
 }
 
-func NewParser(remoteAddr string, recorder func(message string)) *Parser {
+func NewParser(remoteAddr string, recorder func(opCode int32, message string, data map[string]interface{})) *Parser {
 	pr, pw := io.Pipe()
 	parser := &Parser{
 		pipeWriter: pw,
@@ -61,22 +63,30 @@ func (parser *Parser) Close() {
 	_ = parser.pipeWriter.Close()
 }
 
-func (parser *Parser) writeParsedMessage(opCode int32, message string) {
+func (parser *Parser) writeParsedMessage(opCode int32, message string, data map[string]interface{}) {
 	switch opCode {
-	case opCommand, opDelete, opInsert, opQuery, opUpdate:
-		parser.recorder(message)
+	case opCommand, opDelete, opInsert, opQuery, opUpdate, opMsg, opMsgNew:
+		if data == nil {
+			data = log.Fields{}
+		}
+
+		data["opCode"] = opCode
+		parser.recorder(opCode, message, data)
 	default:
 	}
 }
 
 func (parser *Parser) writeErrorMessage(message string) {
-	parser.recorder(message)
+	parser.recorder(0, message, log.Fields{
+		"opCode": 0,
+	})
 }
 
 func (parser *Parser) Parse(r *io.PipeReader) {
 	defer func() {
 		if e := recover(); e != nil {
 			parser.writeErrorMessage(fmt.Sprintf("parser failed, painc: %v\n", e))
+			debug.PrintStack()
 			parser.pipeWriterClosed = true
 			_ = parser.pipeWriter.Close()
 		}
@@ -138,15 +148,18 @@ func (parser *Parser) parseQuery(header msgHeader, r io.Reader) {
 	numberToReturn := mustReadInt32(r)
 	query := toJson(readDocument(r))
 	selector := toJson(readDocument(r))
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("QUERY id:%d coll:%s toskip:%d toret:%d flag:%b query:%v sel:%v\n",
-		header.RequestID,
-		fullCollectionName,
-		numberToSkip,
-		numberToReturn,
-		flag,
-		query,
-		selector,
-	))
+	parser.writeParsedMessage(
+		header.OpCode,
+		fmt.Sprintf("QUERY id:%d coll:%s toskip:%d toret:%d flag:%b query:%v sel:%v\n",
+			header.RequestID,
+			fullCollectionName,
+			numberToSkip,
+			numberToReturn,
+			flag,
+			query,
+			selector),
+		nil,
+	)
 }
 
 func (parser *Parser) parseInsert(header msgHeader, r io.Reader) {
@@ -160,7 +173,7 @@ func (parser *Parser) parseInsert(header msgHeader, r io.Reader) {
 		docsStr = toJson(docs)
 	}
 	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("INSERT id:%d coll:%s flag:%b docs:%v\n",
-		header.RequestID, fullCollectionName, flag, docsStr))
+		header.RequestID, fullCollectionName, flag, docsStr), nil)
 }
 
 func (parser *Parser) parseUpdate(header msgHeader, r io.Reader) {
@@ -170,7 +183,7 @@ func (parser *Parser) parseUpdate(header msgHeader, r io.Reader) {
 	selector := toJson(readDocument(r))
 	update := toJson(readDocument(r))
 	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("UPDATE id:%d coll:%s flag:%b sel:%v update:%v\n",
-		header.RequestID, fullCollectionName, flag, selector, update))
+		header.RequestID, fullCollectionName, flag, selector, update), nil)
 }
 
 func (parser *Parser) parseGetMore(header msgHeader, r io.Reader) {
@@ -179,7 +192,7 @@ func (parser *Parser) parseGetMore(header msgHeader, r io.Reader) {
 	numberToReturn := mustReadInt32(r)
 	cursorID := readInt64(r)
 	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("GETMORE id:%d coll:%s toret:%d curID:%d\n",
-		header.RequestID, fullCollectionName, numberToReturn, cursorID))
+		header.RequestID, fullCollectionName, numberToReturn, cursorID), nil)
 }
 
 func (parser *Parser) parseDelete(header msgHeader, r io.Reader) {
@@ -188,7 +201,7 @@ func (parser *Parser) parseDelete(header msgHeader, r io.Reader) {
 	flag := mustReadInt32(r)
 	selector := toJson(readDocument(r))
 	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("DELETE id:%d coll:%s flag:%b sel:%v \n",
-		header.RequestID, fullCollectionName, flag, selector))
+		header.RequestID, fullCollectionName, flag, selector), nil)
 }
 
 func (parser *Parser) parseKillCursors(header msgHeader, r io.Reader) {
@@ -204,7 +217,7 @@ func (parser *Parser) parseKillCursors(header msgHeader, r io.Reader) {
 		break
 	}
 	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("KILLCURSORS id:%d numCurID:%d curIDs:%d\n",
-		header.RequestID, numberOfCursorIDs, cursorIDs))
+		header.RequestID, numberOfCursorIDs, cursorIDs), nil)
 }
 
 func (parser *Parser) parseReply(header msgHeader, r io.Reader) {
@@ -225,20 +238,21 @@ func (parser *Parser) parseReply(header msgHeader, r io.Reader) {
 		cursorID,
 		startingFrom,
 		numberReturned,
-		docsStr,
-	))
+		docsStr), nil)
 }
 
 func (parser *Parser) parseMsg(header msgHeader, r io.Reader) {
 	msg := readCString(r)
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("MSG %d %s\n", header.RequestID, msg))
+	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("MSG %d %s\n", header.RequestID, msg), log.Fields{
+		"msg": msg,
+	})
 }
 func (parser *Parser) parseReserved(header msgHeader) {
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("RESERVED header:%v data:%v\n", header.RequestID, toJson(header)))
+	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("RESERVED header:%v data:%v\n", header.RequestID, toJson(header)), nil)
 }
 
 func (parser *Parser) parseCommandDeprecated(header msgHeader, r io.Reader) {
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("msgHeader %v\n", toJson(header)))
+	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("msgHeader %v\n", toJson(header)), nil)
 	// TODO: no document, current not understand
 	_, err := io.Copy(ioutil.Discard, r)
 	if err != nil {
@@ -247,7 +261,7 @@ func (parser *Parser) parseCommandDeprecated(header msgHeader, r io.Reader) {
 	}
 }
 func (parser *Parser) parseCommandReplyDeprecated(header msgHeader, r io.Reader) {
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("msgHeader %v\n", toJson(header)))
+	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("msgHeader %v\n", toJson(header)), nil)
 	// TODO: no document, current not understand
 	_, err := io.Copy(ioutil.Discard, r)
 	if err != nil {
@@ -261,49 +275,54 @@ func (parser *Parser) parseCommand(header msgHeader, r io.Reader) {
 	metadata := toJson(readDocument(r))
 	commandArgs := toJson(readDocument(r))
 	inputDocs := toJson(readDocuments(r))
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("COMMAND id:%v db:%v meta:%v cmd:%v args:%v docs %v\n",
-		header.RequestID,
-		database,
-		metadata,
-		commandName,
-		commandArgs,
-		inputDocs,
-	))
+	parser.writeParsedMessage(
+		header.OpCode,
+		fmt.Sprintf("COMMAND id:%v db:%v meta:%v cmd:%v args:%v docs %v\n",
+			header.RequestID,
+			database,
+			metadata,
+			commandName,
+			commandArgs,
+			inputDocs),
+		nil)
 }
 
 func (parser *Parser) parseMsgNew(header msgHeader, r io.Reader) {
-	flags := toJson(mustReadInt32(r))
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("MSG start id:%v flags: %v\n",
-		header.RequestID,
-		flags,
-	))
+	mustReadInt32(r)
 	for {
 		t := readBytes(r, 1)
 		if t == nil {
-			parser.writeParsedMessage(header.OpCode, fmt.Sprintf("MSG end id:%v \n",
-				header.RequestID,
-			))
 			break
 		}
 		switch t[0] {
 		case 0: // body
 			body := toJson(readDocument(r))
 			checksum, _ := readUint32(r)
-			parser.writeParsedMessage(header.OpCode, fmt.Sprintf("MSG id:%v type:0 body: %v checksum:%v\n",
-				header.RequestID,
-				body,
-				checksum,
-			))
+			parser.writeParsedMessage(
+				header.OpCode,
+				fmt.Sprintf("MSG id: %v checksum: %v", header.RequestID, checksum),
+				log.Fields{
+					"type": 0,
+					"body": body,
+				},
+			)
 		case 1:
 			sectionSize := mustReadInt32(r)
 			r1 := io.LimitReader(r, int64(sectionSize))
 			documentSequenceIdentifier := readCString(r1)
 			objects := toJson(readDocuments(r1))
-			parser.writeParsedMessage(header.OpCode, fmt.Sprintf("MSG id:%v type:1 documentSequenceIdentifier: %v objects:%v\n",
-				header.RequestID,
-				documentSequenceIdentifier,
-				objects,
-			))
+			parser.writeParsedMessage(
+				header.OpCode,
+				fmt.Sprintf("MSG id: %v objects: %v",
+					header.RequestID,
+					objects,
+				),
+				log.Fields{
+					"type":                       1,
+					"documentSequenceIdentifier": documentSequenceIdentifier,
+					"objects":                    objects,
+				},
+			)
 		default:
 			parser.writeErrorMessage(fmt.Sprintf("unknown body kind: %v", t[0]))
 		}
@@ -314,6 +333,14 @@ func (parser *Parser) parseCommandReply(header msgHeader, r io.Reader) {
 	metadata := toJson(readDocument(r))
 	commandReply := toJson(readDocument(r))
 	outputDocs := toJson(readDocument(r))
-	parser.writeParsedMessage(header.OpCode, fmt.Sprintf("COMMANDREPLY to:%d id:%v meta:%v cmdReply:%v outputDocs:%v\n",
-		header.ResponseTo, header.RequestID, metadata, commandReply, outputDocs))
+	parser.writeParsedMessage(
+		header.OpCode,
+		fmt.Sprintf("COMMANDREPLY to:%d id:%v meta:%v cmdReply:%v outputDocs:%v\n",
+			header.ResponseTo, header.RequestID, metadata, commandReply, outputDocs),
+		log.Fields{
+			"meta":          metadata,
+			"command_reply": commandReply,
+			"output_docs":   outputDocs,
+		},
+	)
 }

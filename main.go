@@ -2,10 +2,9 @@ package main
 
 import (
 	"flag"
-	"fmt"
 	"github.com/ma6174/mgosniff/mongo"
+	"github.com/mylxsw/asteria/log"
 	"io"
-	"log"
 	"net"
 	"os"
 	"sync"
@@ -24,26 +23,25 @@ var (
 func handleConn(conn net.Conn) {
 	dst, err := net.Dial("tcp", *dstAddr)
 	if err != nil {
-		log.Printf("[%s] unexpected err:%v, close connection:%s\n", conn.RemoteAddr(), err, conn.RemoteAddr())
+		log.Errorf("[%s] unexpected err:%v, close connection:%s\n", conn.RemoteAddr(), err, conn.RemoteAddr())
 		conn.Close()
 		return
 	}
 	defer dst.Close()
-	log.Printf("[%s] new client connected: %v -> %v -> %v -> %v\n", conn.RemoteAddr(),
+	log.Debugf("[%s] new client connected: %v -> %v -> %v -> %v\n", conn.RemoteAddr(),
 		conn.RemoteAddr(), conn.LocalAddr(), dst.LocalAddr(), dst.RemoteAddr())
-	parser := mongo.NewParser(conn.RemoteAddr().String(), func(message string) {
-		fmt.Println(message)
-	})
-	parser2 := mongo.NewParser(conn.RemoteAddr().String(), func(message string) {
+	parser := mongo.NewParser(conn.RemoteAddr().String(), func(opCode int32, message string, data map[string]interface{}) {
+		if opCode == 0 {
+			log.WithFields(data).Error(message)
+			return
+		}
 
+		log.WithFields(data).Info(message)
 	})
-	teeReader := io.TeeReader(conn, parser)
-	teeReader2 := io.TeeReader(dst, parser2)
 	clean := func() {
 		conn.Close()
 		dst.Close()
 		parser.Close()
-		parser2.Close()
 	}
 	cp := func(dst io.Writer, src io.Reader, srcAddr string) {
 		p := bufferPool.Get().([]byte)
@@ -51,16 +49,19 @@ func handleConn(conn net.Conn) {
 			n, err := src.Read(p)
 			if err != nil {
 				if err != io.EOF && !mongo.IsClosedErr(err) {
-					log.Printf("[%s] unexpected error:%v\n", conn.RemoteAddr(), err)
+					log.Errorf("[%s] unexpected error:%v\n", conn.RemoteAddr(), err)
 				}
-				log.Printf("[%s] close connection:%s\n", conn.RemoteAddr(), srcAddr)
+				log.Errorf("[%s] close connection:%s\n", conn.RemoteAddr(), srcAddr)
 				clean()
 				break
 			}
+
+			go parser.Write(p[:n])
+
 			_, err = dst.Write(p[:n])
 			if err != nil {
 				if err != io.EOF && !mongo.IsClosedErr(err) {
-					log.Printf("[%s] unexpected error:%v\n", conn.RemoteAddr(), err)
+					log.Errorf("[%s] unexpected error:%v\n", conn.RemoteAddr(), err)
 				}
 				clean()
 				break
@@ -68,23 +69,23 @@ func handleConn(conn net.Conn) {
 		}
 		bufferPool.Put(p)
 	}
-	go cp(conn, teeReader2, dst.RemoteAddr().String())
-	cp(dst, teeReader, conn.RemoteAddr().String())
+	go cp(conn, dst, dst.RemoteAddr().String())
+	cp(dst, conn, conn.RemoteAddr().String())
 }
 
 func main() {
-	log.SetFlags(log.LstdFlags | log.Lshortfile)
 	flag.Parse()
 
-	log.Printf("%s listen at %s, proxy to mongodb server %s\n", os.Args[0], *listenAddr, *dstAddr)
+	log.Debugf("%s listen at %s, proxy to mongodb server %s\n", os.Args[0], *listenAddr, *dstAddr)
 	ln, err := net.Listen("tcp", *listenAddr)
 	if err != nil {
-		log.Fatal("listen failed:", err)
+		log.Errorf("listen failed:", err)
+		return
 	}
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			log.Println("accept connection failed:", err)
+			log.Errorf("accept connection failed:", err)
 			continue
 		}
 		go handleConn(conn)
