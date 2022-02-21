@@ -64,16 +64,22 @@ func (parser *Parser) Close() {
 }
 
 func (parser *Parser) writeParsedMessage(opCode int32, message string, data map[string]interface{}) {
-	switch opCode {
-	case opCommand, opDelete, opInsert, opQuery, opUpdate, opMsg, opMsgNew:
-		if data == nil {
-			data = log.Fields{}
-		}
-
-		data["opCode"] = opCode
-		parser.recorder(opCode, message, data)
-	default:
+	if data == nil {
+		data = log.Fields{}
 	}
+
+	data["opCode"] = opCode
+	parser.recorder(opCode, message, data)
+	//switch opCode {
+	//case opCommand, opDelete, opInsert, opQuery, opUpdate, opMsg, opMsgNew:
+	//	if data == nil {
+	//		data = log.Fields{}
+	//	}
+	//
+	//	data["opCode"] = opCode
+	//	parser.recorder(opCode, message, data)
+	//default:
+	//}
 }
 
 func (parser *Parser) writeErrorMessage(message string) {
@@ -311,6 +317,7 @@ func (parser *Parser) parseMsgNew(header msgHeader, r io.Reader) {
 			r1 := io.LimitReader(r, int64(sectionSize))
 			documentSequenceIdentifier := readCString(r1)
 			objects := toJson(readDocuments(r1))
+
 			parser.writeParsedMessage(
 				header.OpCode,
 				fmt.Sprintf("MSG id: %v objects: %v",

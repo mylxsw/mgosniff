@@ -20,6 +20,14 @@ func IsClosedErr(err error) bool {
 	return false
 }
 
+func mustReadUInt32(r io.Reader) (n uint32) {
+	err := binary.Read(r, binary.LittleEndian, &n)
+	if err != nil {
+		panic(err)
+	}
+	return
+}
+
 func mustReadInt32(r io.Reader) (n int32) {
 	err := binary.Read(r, binary.LittleEndian, &n)
 	if err != nil {
@@ -88,6 +96,9 @@ func readOne(r io.Reader) []byte {
 	buf := make([]byte, int(docLen))
 	binary.LittleEndian.PutUint32(buf, uint32(docLen))
 	if _, err := io.ReadFull(r, buf[4:]); err != nil {
+		if err == io.ErrUnexpectedEOF || err == io.EOF {
+			return nil
+		}
 		panic(err)
 	}
 	return buf

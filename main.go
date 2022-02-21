@@ -2,7 +2,9 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"github.com/ma6174/mgosniff/mongo"
+	"github.com/mongodb/mongonet"
 	"github.com/mylxsw/asteria/log"
 	"io"
 	"net"
@@ -30,20 +32,56 @@ func handleConn(conn net.Conn) {
 	defer dst.Close()
 	log.Debugf("[%s] new client connected: %v -> %v -> %v -> %v\n", conn.RemoteAddr(),
 		conn.RemoteAddr(), conn.LocalAddr(), dst.LocalAddr(), dst.RemoteAddr())
-	parser := mongo.NewParser(conn.RemoteAddr().String(), func(opCode int32, message string, data map[string]interface{}) {
-		if opCode == 0 {
-			log.WithFields(data).Error(message)
-			return
-		}
 
-		log.WithFields(data).Info(message)
-	})
 	clean := func() {
 		conn.Close()
 		dst.Close()
-		parser.Close()
 	}
-	cp := func(dst io.Writer, src io.Reader, srcAddr string) {
+
+	pr, pw := io.Pipe()
+	defer func() {
+		pr.Close()
+		pw.Close()
+	}()
+
+	go func() {
+		for {
+			message, err := mongonet.ReadMessage(pr)
+			if err != nil {
+				panic(err)
+			}
+
+			fmt.Println(message.Header().OpCode)
+			switch message.Header().OpCode {
+			case mongonet.OP_MSG, mongonet.OP_MSG_LEGACY:
+				msg := message.(*mongonet.MessageMessage)
+				bodyDoc, err := msg.BodyDoc()
+				if err != nil {
+					panic(err)
+				}
+
+				log.WithFields(log.Fields{
+					"bodyDoc": bodyDoc.String(),
+				}).Info("OP_MSG")
+			case mongonet.OP_INSERT:
+				msg := message.(*mongonet.InsertMessage)
+				log.WithFields(log.Fields{
+					"namespace": msg.Namespace,
+					"docs":      msg.Docs,
+				}).Info("OP_INSERT")
+			case mongonet.OP_QUERY:
+				msg := message.(*mongonet.QueryMessage)
+				log.F(log.M{
+					"namespace": msg.Namespace,
+					"project":   msg.Project,
+					"query":     msg.Query,
+				}).Info("OP_QUERY")
+
+			}
+		}
+	}()
+
+	cp := func(dst io.Writer, src io.Reader, srcAddr string, cb func(data []byte)) {
 		p := bufferPool.Get().([]byte)
 		for {
 			n, err := src.Read(p)
@@ -56,7 +94,9 @@ func handleConn(conn net.Conn) {
 				break
 			}
 
-			go parser.Write(p[:n])
+			if cb != nil {
+				cb(p[:n])
+			}
 
 			_, err = dst.Write(p[:n])
 			if err != nil {
@@ -69,8 +109,12 @@ func handleConn(conn net.Conn) {
 		}
 		bufferPool.Put(p)
 	}
-	go cp(conn, dst, dst.RemoteAddr().String())
-	cp(dst, conn, conn.RemoteAddr().String())
+	go cp(conn, dst, dst.RemoteAddr().String(), func(data []byte) {
+		//pw.Write(data)
+	})
+	cp(dst, conn, conn.RemoteAddr().String(), func(data []byte) {
+		pw.Write(data)
+	})
 }
 
 func main() {
